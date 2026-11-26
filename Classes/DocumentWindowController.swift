@@ -236,11 +236,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
         detailsItem.viewController.view.addSubview(trackViewController.view)
 
         // Tags-only mode: tracks are displayed but cannot be modified, except
-        // for the fields MP42MkvTagWriter writes back (see allowsTrackEditing).
-        // Set after the view is loaded so it wins over controls that the view
-        // controllers enable during their own updates.
+        // for the fields MP42MkvTagWriter writes back (see allowsTrackEditing)
+        // and the chapters tab (ChapterViewController edits ride the remuxer's
+        // replacementChapters). Set after the view is loaded so it wins over
+        // controls that the view controllers enable during their own updates.
         trackViewController.isMatroskaDocument = doc.isMatroska
-        if doc.isMatroska, !(trackViewController is MovieViewController) {
+        if doc.isMatroska, !(trackViewController is MovieViewController),
+           !(trackViewController is ChapterViewController) {
             trackViewController.allowsTrackEditing = true
             trackViewController.isReadOnly = true
         } else {
@@ -506,7 +508,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
 
     private func addChapters(fileURL: URL) {
         let track = MP42ChapterTrack(fromFile: fileURL)
-        mp4.addTrack(track)
+        mp4.addTrack(track) // replaces any previous chapter track
+        if doc.isMatroska {
+            // addTrack: zeroes trackId; keep the table numbering dense, and
+            // flag the document dirty (the tags-only model has no muxing to
+            // mark it, same as importSubtitleTracksForMatroska).
+            track.trackId = (mp4.tracks.map { $0.trackId }.max() ?? 0) + 1
+            doc.updateChangeCount(.changeDone)
+        }
         tracksViewController.reloadData()
         tracksViewController.selectTracks([track])
     }
@@ -517,6 +526,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
             if let track = mp4.chapters {
                 chapterViewController?.track = track
                 tracksViewController.selectTracks([track])
+                if doc.isMatroska { doc.updateChangeCount(.changeDone) }
             }
         }
         catch {
@@ -571,20 +581,30 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
         panel.canChooseDirectories = false
 
         if doc.isMatroska {
-            // A Matroska document can only gain subtitle text tracks (the
-            // stream-copy remuxer writes them as S_TEXT/UTF8); chapter files
-            // (.txt/.csv) stay unavailable because chapter writing is not
-            // implemented for Matroska.
+            // A Matroska document can gain subtitle text tracks (the
+            // stream-copy remuxer writes them as S_TEXT/UTF8) and chapters
+            // (.txt creates/replaces the chapter track, .csv updates an
+            // existing one — same dispatch the MP4 branch uses below).
+            let chapterExtensions = ["txt", "csv"]
             if #available(macOS 11, *) {
-                panel.allowedContentTypes = DocumentWindowController.matroskaSubtitleExtensions.compactMap {
+                panel.allowedContentTypes = (DocumentWindowController.matroskaSubtitleExtensions + chapterExtensions).compactMap {
                     UTType(filenameExtension: $0)
                 }
             } else {
-                panel.allowedFileTypes = DocumentWindowController.matroskaSubtitleExtensions
+                panel.allowedFileTypes = DocumentWindowController.matroskaSubtitleExtensions + chapterExtensions
             }
             panel.beginSheetModal(for: windowForSheet) { (response) in
-                if response == NSApplication.ModalResponse.OK {
-                    self.showImportSheet(fileURLs: panel.urls)
+                guard response == NSApplication.ModalResponse.OK else { return }
+                var subtitleURLs: [URL] = []
+                for url in panel.urls {
+                    switch url.pathExtension.lowercased() {
+                    case "txt": self.addChapters(fileURL: url)
+                    case "csv": self.updateChapters(fileURL: url)
+                    default: subtitleURLs.append(url)
+                    }
+                }
+                if subtitleURLs.isEmpty == false {
+                    self.showImportSheet(fileURLs: subtitleURLs)
                 }
             }
             return
@@ -752,13 +772,19 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
             let items = pasteboard.readObjects(forClasses: [NSURL.classForCoder()], options: [:]) as? [URL]
             else { return false }
 
-        // Metadata drops are fine in tags-only mode; chapter and track
-        // imports modify tracks, which Matroska documents cannot do.
-        if doc.isMatroska == false {
-            let chapters = items.filter { $0.pathExtension.lowercased() == "txt" }
-            if let url = chapters.first {
+        // Metadata drops are fine in tags-only mode. Chapters ride the
+        // remuxer on Matroska documents, so txt/csv drops route there too;
+        // everything else that would add a track goes through the import
+        // panel (which routes Matroska docs to the subtitle-only path).
+        if doc.isMatroska {
+            if let url = items.first(where: { $0.pathExtension.lowercased() == "txt" }) {
                 addChapters(fileURL: url)
             }
+            if let url = items.first(where: { $0.pathExtension.lowercased() == "csv" }) {
+                updateChapters(fileURL: url)
+            }
+        } else if let url = items.first(where: { $0.pathExtension.lowercased() == "txt" }) {
+            addChapters(fileURL: url)
         }
 
         let metadata = items.filter { let ext = $0.pathExtension.lowercased(); return ext == "xml" ||  ext == "nfo" }

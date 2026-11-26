@@ -26,6 +26,12 @@ final class Document: NSDocument {
     // pseudo-track filtered): the baseline MP42MkvRemuxer pairs TrackEntry
     // elements against, so a deleted track is detected by object identity.
     private var mkvSourceTracks: [MP42Track] = []
+    // Chapter rows as the file's baseline holds them (model milliseconds).
+    // nil when the last read/written file had no chapters. Compared against
+    // the model on save: model-vs-snapshot (not model-vs-file) because the
+    // importer itself drops some atoms (duplicate zero timestamps), and
+    // those silently-dropped atoms must not look like a user edit.
+    private var mkvChaptersSnapshot: [(timestamp: UInt64, title: String)]?
     private var mkvFileSize: UInt64 = 0
     private var mkvFileModificationDate: Date?
 
@@ -146,6 +152,7 @@ final class Document: NSDocument {
         // Order-sensitive snapshot for the remuxer's TrackEntry pairing; the
         // chapter pseudo-track has no TrackEntry and must not shift positions.
         mkvSourceTracks = importer.tracks.filter { $0.isMember(of: MP42ChapterTrack.self) == false }
+        mkvChaptersSnapshot = Self.matroskaChapterRows(mp4.chapters)
         snapshotMatroskaFile(at: url)
     }
 
@@ -315,9 +322,27 @@ final class Document: NSDocument {
         // still compares equal.
         let tracksChanged = currentTracks.count != mkvSourceTracks.count ||
             currentTracks.contains { track in mkvSourceTracks.contains(where: { $0 === track }) == false }
+        // Chapters ride the remuxer too: the Chapters element sits before the
+        // Clusters, so any size change shifts every following byte (the tag
+        // writer's in-place machinery is tail-only). An added-but-empty
+        // chapter track means "delete every chapter" — the remuxer removes
+        // the element.
+        let modelChapterRows = Self.matroskaChapterRows(mp4.chapters)
+        let chaptersChanged: Bool
+        switch (modelChapterRows, mkvChaptersSnapshot) {
+        case (nil, nil): chaptersChanged = false
+        case let (model?, snapshot?):
+            chaptersChanged = model.count != snapshot.count ||
+                zip(model, snapshot).contains { $0.timestamp != $1.timestamp || $0.title != $1.title }
+        default: chaptersChanged = true
+        }
 
-        if tracksChanged || saveOperation != .saveOperation {
-            try remuxMatroska(to: url, currentTracks: currentTracks)
+        if tracksChanged || chaptersChanged || saveOperation != .saveOperation {
+            // An absent model track means "no chapters" — pass an empty
+            // track so the remuxer removes the element rather than copying
+            // the old one verbatim (nil replacement = verbatim).
+            try remuxMatroska(to: url, currentTracks: currentTracks,
+                              replacementChapters: chaptersChanged ? (mp4.chapters ?? MP42ChapterTrack()) : nil)
             return
         }
 
@@ -341,7 +366,13 @@ final class Document: NSDocument {
     // Stream-copy rebuild: blocks are copied verbatim except those of removed
     // tracks, and metadata/cover/track-field edits ride in the same pass.
     // Writes a temp file and renames atomically; see MP42MkvRemuxer.h.
-    private func remuxMatroska(to url: URL, currentTracks: [MP42Track]) throws {
+    private static func matroskaChapterRows(_ track: MP42ChapterTrack?) -> [(timestamp: UInt64, title: String)]? {
+        guard let track else { return nil }
+        return track.chapters.map { ($0.timestamp, $0.title) }
+    }
+
+    private func remuxMatroska(to url: URL, currentTracks: [MP42Track],
+                               replacementChapters: MP42ChapterTrack?) throws {
         guard let sourceURL = fileURL else {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
                           userInfo: [NSLocalizedDescriptionKey: NSLocalizedString("The Matroska source file is unknown.", comment: "Document MKV remux missing source error.")])
@@ -352,10 +383,16 @@ final class Document: NSDocument {
         remuxer.progressHandler = { [weak self] progress in
             self?.mp4.progressHandler?(progress)
         }
+        // nil keeps the source Chapters element verbatim.
+        remuxer.replacementChapters = replacementChapters
         mkvRemuxer = remuxer
         try remuxer.remux(to: url, metadata: mp4.metadata,
                           sourceTracks: mkvSourceTracks, currentTracks: currentTracks)
         mkvRemuxer = nil
+        // The written file's chapters are exactly what the model holds now
+        // (modulo the writer's own sort/clamp, which the model then absorbs
+        // on the next read — an untouched save must not look "changed").
+        mkvChaptersSnapshot = Self.matroskaChapterRows(mp4.chapters)
         // The output keeps the surviving TrackEntry elements in source file
         // order and appends one TrackEntry per added subtitle track last
         // (MP42MkvRemuxer), so re-snapshot the pairing baseline in that same
