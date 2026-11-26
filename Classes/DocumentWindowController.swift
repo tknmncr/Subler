@@ -282,9 +282,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
              #selector(sendToQueue(_:)):
             return true
 
-        // Track/chapter modifications: unavailable in Matroska tags-only mode.
-        case #selector(selectFile(_:)),
-             #selector(searchChapters(_:)),
+        // Matroska documents may import subtitle text files (written as
+        // S_TEXT/UTF8 by the stream-copy remuxer on save).
+        case #selector(selectFile(_:)):
+            return true
+
+        // Chapter/track bulk modifications: unavailable in Matroska tags-only mode.
+        case #selector(searchChapters(_:)),
              #selector(addChaptersEvery(_:)),
              #selector(iTunesFriendlyTrackGroups(_:)),
              #selector(clearTrackNames(_:)),
@@ -566,6 +570,26 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
 
+        if doc.isMatroska {
+            // A Matroska document can only gain subtitle text tracks (the
+            // stream-copy remuxer writes them as S_TEXT/UTF8); chapter files
+            // (.txt/.csv) stay unavailable because chapter writing is not
+            // implemented for Matroska.
+            if #available(macOS 11, *) {
+                panel.allowedContentTypes = DocumentWindowController.matroskaSubtitleExtensions.compactMap {
+                    UTType(filenameExtension: $0)
+                }
+            } else {
+                panel.allowedFileTypes = DocumentWindowController.matroskaSubtitleExtensions
+            }
+            panel.beginSheetModal(for: windowForSheet) { (response) in
+                if response == NSApplication.ModalResponse.OK {
+                    self.showImportSheet(fileURLs: panel.urls)
+                }
+            }
+            return
+        }
+
         if #available(macOS 11, *) {
             panel.allowedContentTypes = MP42FileImporter.supportedContentTypes() + [.text, .commaSeparatedText]
         } else {
@@ -588,8 +612,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
         }
     }
 
+    /// Subtitle text files a Matroska document can gain — must stay in sync
+    /// with the extension gate in MP42MkvRemuxer's added-track validation.
+    static let matroskaSubtitleExtensions = ["srt", "ssa", "ass"]
+
     func showImportSheet(fileURLs: [URL]) {
-        guard doc.isMatroska == false else { return }
+        if doc.isMatroska {
+            importSubtitleTracksForMatroska(fileURLs: fileURLs)
+            return
+        }
 
         do {
             let controller = try FileImportController(fileURLs: fileURLs, delegate: self)
@@ -608,6 +639,52 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
                 presentError(error)
             }
         }
+    }
+
+    // A Matroska document gains subtitle tracks by re-parsing the source text
+    // file at save time (MP42MkvRemuxer writes S_TEXT/UTF8 BlockGroups), so
+    // the model only needs the track object with its URL — no FileImportController
+    // sheet, and crucially none of didSelect's organizeAlternateGroups/
+    // inferMediaCharacteristics churn, which would shift model indices and
+    // break the remuxer's TrackEntry↔sourceTracks identity pairing.
+    func importSubtitleTracksForMatroska(fileURLs: [URL]) {
+        let allowed = DocumentWindowController.matroskaSubtitleExtensions
+        let subtitleURLs = fileURLs.filter { allowed.contains($0.pathExtension.lowercased()) }
+        guard subtitleURLs.isEmpty == false else { return }
+
+        var addedTracks: [MP42Track] = []
+        var nextDisplayId: MP42TrackId = (mp4.tracks.map { $0.trackId }.max() ?? 0) + 1
+        for url in subtitleURLs {
+            do {
+                let importer = try MP42FileImporter(url: url)
+                for track in importer.tracks {
+                    guard track.isMember(of: MP42ChapterTrack.self) == false else { continue }
+                    // Same addTrack: invariant the tags-only read establishes
+                    // (see Document.readMatroska) — codecs MP4 cannot carry
+                    // as-is must carry conversion settings.
+                    if trackNeedConversion(track.format) {
+                        (track as? MP42SubtitleTrack)?.conversionSettings = MP42ConversionSettings.subtitlesConversion()
+                    }
+                    mp4.addTrack(track)
+                    // addTrack: zeroes trackId; keep the table numbering dense.
+                    track.trackId = nextDisplayId
+                    nextDisplayId += 1
+                    addedTracks.append(track)
+                }
+            }
+            catch {
+                if let windowForSheet = doc.windowForSheet {
+                    presentError(error, modalFor: windowForSheet, delegate: nil, didPresent: nil, contextInfo: nil)
+                } else {
+                    presentError(error)
+                }
+            }
+        }
+
+        guard addedTracks.isEmpty == false else { return }
+        doc.updateChangeCount(.changeDone)
+        tracksViewController.reloadData()
+        tracksViewController.selectTracks(addedTracks)
     }
 
     @objc func importFilesDirectly(_ fileURLs: [URL]) {
@@ -631,7 +708,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
             mp4.addTrack(track)
         }
 
-        if tracks.isEmpty == false {
+        // Reordering must never touch a Matroska document: the remuxer pairs
+        // TrackEntry elements against mkvSourceTracks by identity, and a
+        // reordered model would mispair them (same rule as delete(tracks:)).
+        if tracks.isEmpty == false, doc.isMatroska == false {
             if Prefs.organizeAlternateGroups {
                 mp4.organizeAlternateGroups()
                 if Prefs.inferMediaCharacteristics {

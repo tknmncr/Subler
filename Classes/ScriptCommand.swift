@@ -342,15 +342,34 @@ class SBSaveAsScriptCommand: NSScriptCommand, ScriptCommandDocumentTargeting {
             logger.write(toLog: "No document available for save as operation")
             return nil
         }
-        
+
         // Use the helper method to extract the destination path
         guard let path = extractFilePath() else {
             return nil
         }
-        
+
         let destinationURL = URL(fileURLWithPath: path)
         let fileName = destinationURL.lastPathComponent
-        
+
+        // mp4.write(to:) below muxes QuickTime atoms and would happily write
+        // an MP4 over a Matroska document, so route those through NSDocument
+        // instead: that picks the tag-writer/remux path in writeMatroska,
+        // enforces the mkv/mka/mks destination, does the fileURL/change-count
+        // bookkeeping, and reports progress itself via Document.save.
+        if sublerDoc.isMatroska {
+            // "Matroska video" is the CFBundleTypeName covering mkv/mka/mks
+            // (NSDocument.documentType is unavailable from Swift; writeSafely
+            // only re-checks the destination extension itself).
+            sublerDoc.save(to: destinationURL, ofType: "Matroska video", for: .saveAsOperation) { error in
+                if let error = error {
+                    logger.write(toLog: "Failed to save document: \(error.localizedDescription)")
+                } else {
+                    logger.write(toLog: "Script save of \(fileName) completed")
+                }
+            }
+            return path
+        }
+
         // Build options dictionary with 64-bit settings from UI preferences
         var options: [String: Any] = [:]
         options[MP4264BitData] = Prefs.mp464bitOffset

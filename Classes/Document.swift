@@ -308,13 +308,15 @@ final class Document: NSDocument {
         }
 
         let currentTracks = mp4.tracks.filter { $0.isMember(of: MP42ChapterTrack.self) == false }
-        // Structural change == some importer-created track is gone. Tracks are
-        // paired by object identity, so a reordered (impossible: reorder is
-        // gated on MKV docs) or merely renamed track still compares equal.
-        let tracksRemoved = currentTracks.count != mkvSourceTracks.count ||
+        // Structural change == some importer-created track is gone, or the
+        // model carries a track the importer never produced (an imported
+        // subtitle). Tracks are paired by object identity, so a reordered
+        // (impossible: reorder is gated on MKV docs) or merely renamed track
+        // still compares equal.
+        let tracksChanged = currentTracks.count != mkvSourceTracks.count ||
             currentTracks.contains { track in mkvSourceTracks.contains(where: { $0 === track }) == false }
 
-        if tracksRemoved || saveOperation != .saveOperation {
+        if tracksChanged || saveOperation != .saveOperation {
             try remuxMatroska(to: url, currentTracks: currentTracks)
             return
         }
@@ -355,10 +357,16 @@ final class Document: NSDocument {
                           sourceTracks: mkvSourceTracks, currentTracks: currentTracks)
         mkvRemuxer = nil
         // The output keeps the surviving TrackEntry elements in source file
-        // order, so re-snapshot the pairing baseline in that same order.
+        // order and appends one TrackEntry per added subtitle track last
+        // (MP42MkvRemuxer), so re-snapshot the pairing baseline in that same
+        // order — otherwise the appended track would look "added" again on
+        // the next save and the TrackEntry count would mispair.
+        let addedTracks = currentTracks.filter { track in
+            mkvSourceTracks.contains(where: { $0 === track }) == false
+        }
         mkvSourceTracks = mkvSourceTracks.filter { track in
             currentTracks.contains(where: { $0 === track })
-        }
+        } + addedTracks
         snapshotMatroskaFile(at: url)
     }
 
