@@ -128,3 +128,17 @@ extension String {
         return matrix[m][n]
     }
 }
+
+extension NSView {
+    /// Enables or disables every NSControl in this view hierarchy. Used to
+    /// present the track property views read-only in Matroska (tags-only)
+    /// documents, where the tracks cannot be modified.
+    func setAllControlsEnabled(_ enabled: Bool) {
+        if let control = self as? NSControl {
+            control.isEnabled = enabled
+        }
+        for subview in subviews {
+            subview.setAllControlsEnabled(enabled)
+        }
+    }
+}

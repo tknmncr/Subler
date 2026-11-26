@@ -104,7 +104,7 @@
 			<key>CFBundleTypeName</key>
 			<string>Matroska video</string>
 			<key>CFBundleTypeRole</key>
-			<string>Viewer</string>
+			<string>Editor</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>NSDocumentClass</key>

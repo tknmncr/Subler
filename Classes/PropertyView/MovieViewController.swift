@@ -122,6 +122,12 @@ class MovieViewController: PropertyView, NSTableViewDataSource, ExpandedTableVie
             }
         }
 
+        // The document may already be known to be Matroska (the flag is set
+        // after this view loads in DocumentWindowController, but subclasses
+        // of the preset editor never set it — the viewDidLoad pass keeps
+        // this view correct either way).
+        updateMatroskaFieldHints()
+
         if #available(macOS 26, *) {
             setsPopUp.menu?.items.first?.image = NSImage.init(systemSymbolName: "ellipsis", accessibilityDescription: nil)
         }
@@ -163,6 +169,59 @@ class MovieViewController: PropertyView, NSTableViewDataSource, ExpandedTableVie
 
     private func updateUI() {
         removeTagButton.isEnabled = self.metadataTableView.selectedRow != -1
+    }
+
+    // MARK: Matroska field hints
+
+    /// Fonts used to flag metadata fields that `MP42MkvTagWriter` cannot save
+    /// (MP4-only keys). They stay selectable on purpose: an MKV document can
+    /// still be converted to MP4 via the queue, where these values do apply.
+    private static let italicMenuFont: NSFont = {
+        return NSFontManager.shared.convert(NSFont.menuFont(ofSize: 0), toHaveTrait: .italicFontMask)
+    }()
+
+    private func isPersistedInMatroska(identifier: String) -> Bool {
+        return MP42MkvMetadataKeyIsPersisted(identifier)
+    }
+
+    override func updateMatroskaFieldHints() {
+        guard isViewLoaded else { return }
+
+        if let menu = tagsPopUp.menu {
+            let identifiers = MP42Metadata.writableMetadata
+            for item in menu.items where item.isHidden == false && item.tag >= 0 && item.tag < identifiers.count {
+                if isMatroskaDocument && !isPersistedInMatroska(identifier: identifiers[item.tag]) {
+                    item.attributedTitle = NSAttributedString(string: item.title, attributes: [
+                        .font: MovieViewController.italicMenuFont,
+                        .foregroundColor: NSColor.secondaryLabelColor,
+                    ])
+                    item.toolTip = NSLocalizedString("This field cannot be saved to a Matroska file.",
+                                                    comment: "Metadata tag menu hint for MP4-only fields")
+                    // Italics/color are invisible to assistive tech; carry the
+                    // hint in the accessibility label too.
+                    item.setAccessibilityLabel(item.title + ", " + NSLocalizedString("cannot be saved to a Matroska file",
+                                                                                    comment: "Metadata tag menu hint for MP4-only fields"))
+                } else {
+                    // Empty attributed title: AppKit falls back to `title`.
+                    item.attributedTitle = NSAttributedString(string: "")
+                    item.toolTip = nil
+                    item.setAccessibilityLabel(nil)
+                }
+            }
+            // Track # and TV Episode # share the single PART_NUMBER tag on
+            // Matroska files (see syncMatroskaEpisodeFields) — say so.
+            if isMatroskaDocument {
+                for key in [MP42MetadataKeyTrackNumber, MP42MetadataKeyTVEpisodeNumber] {
+                    // items are addressed by tag, not position: the pulls-down
+                    // title item occupies position 0
+                    if let index = identifiers.firstIndex(of: key),
+                       let item = menu.items.first(where: { $0.isHidden == false && $0.tag == index }) {
+                        item.toolTip = NSLocalizedString("In Matroska files these two fields share one tag: editing either updates both.",
+                                                         comment: "Metadata tag menu note for Track #/TV Episode #")
+                    }
+                }
+            }
+        }
     }
 
     // MARK: Metadata
@@ -539,6 +598,19 @@ class MovieViewController: PropertyView, NSTableViewDataSource, ExpandedTableVie
             else {
                 cell?.textField?.textColor = .disabledControlTextColor
             }
+            if let textField = cell?.textField {
+                // Cells are reused: strip any italic from a previous row first,
+                // then italicize MP4-only fields on Matroska documents.
+                let baseFont = NSFontManager.shared.convert(textField.font ?? NSFont.systemFont(ofSize: 0),
+                                                            toNotHaveTrait: .italicFontMask)
+                let flagField = isMatroskaDocument && !isPersistedInMatroska(identifier: item.identifier)
+                textField.font = flagField ? NSFontManager.shared.convert(baseFont, toHaveTrait: .italicFontMask) : baseFont
+                let label = localizedMetadataKeyName(item.identifier) ?? item.identifier
+                textField.setAccessibilityLabel(flagField ?
+                    label + ", " + NSLocalizedString("cannot be saved to a Matroska file",
+                                                     comment: "Metadata field hint for MP4-only fields") :
+                    nil)
+            }
             return cell
 
         } else if tableColumn?.identifier == valueColumn {
@@ -665,6 +737,48 @@ class MovieViewController: PropertyView, NSTableViewDataSource, ExpandedTableVie
         let editedItem = MP42MetadataItem(identifier: item.identifier, value: value as! NSCopying & NSObjectProtocol, dataType: type, extendedLanguageTag: item.extendedLanguageTag)
 
         replace(metadataItem: item, withItem: editedItem)
+        syncMatroskaEpisodeFields(from: editedItem)
+    }
+
+    /// Matroska stores a single movie-level `PART_NUMBER` tag, and the importer
+    /// fills both Track # and TV Episode # from it. On Matroska documents the
+    /// two rows must therefore move together: whichever one the user edits
+    /// updates the other, so the edit is what `MP42MkvTagWriter` regenerates
+    /// `PART_NUMBER` from. No-op on MP4 documents, where the two are separate
+    /// atoms.
+    private func syncMatroskaEpisodeFields(from editedItem: MP42MetadataItem) {
+        guard isMatroskaDocument else { return }
+
+        let numbers = (editedItem.arrayValue as? [Any])?.compactMap { ($0 as? NSNumber)?.intValue } ?? []
+
+        switch editedItem.identifier {
+        case MP42MetadataKeyTrackNumber:
+            let newIndex = numbers.first ?? 0
+            guard let episode = metadata.metadataItemsFiltered(byIdentifier: MP42MetadataKeyTVEpisodeNumber).first,
+                  episode.numberValue?.intValue != newIndex else { return }
+            let replacement = MP42MetadataItem(identifier: MP42MetadataKeyTVEpisodeNumber,
+                                               value: NSNumber(value: newIndex) as NSCopying & NSObjectProtocol,
+                                               dataType: episode.dataType,
+                                               extendedLanguageTag: episode.extendedLanguageTag)
+            replace(metadataItem: episode, withItem: replacement)
+
+        case MP42MetadataKeyTVEpisodeNumber:
+            let newNumber = editedItem.numberValue?.intValue ?? 0
+            guard let track = metadata.metadataItemsFiltered(byIdentifier: MP42MetadataKeyTrackNumber).first else {
+                return // no Track # row: the writer falls back to TV Episode # itself
+            }
+            let parts = (track.arrayValue as? [Any])?.compactMap { ($0 as? NSNumber)?.intValue } ?? []
+            let total = parts.count > 1 ? parts[1] : 0
+            guard (parts.first ?? 0) != newNumber else { return }
+            let replacement = MP42MetadataItem(identifier: MP42MetadataKeyTrackNumber,
+                                               value: [NSNumber(value: newNumber), NSNumber(value: total)] as NSCopying & NSObjectProtocol,
+                                               dataType: .integerArray,
+                                               extendedLanguageTag: track.extendedLanguageTag)
+            replace(metadataItem: track, withItem: replacement)
+
+        default:
+            break
+        }
     }
 
     @IBAction func setMetadataBoolValue(_ sender: NSButton) {

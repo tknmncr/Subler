@@ -20,6 +20,10 @@ final class SoundViewController : PropertyView {
 
     let mediaTagsController: MediaTagsController
 
+    override var isReadOnly: Bool {
+        didSet { mediaTagsController.isReadOnly = isReadOnly }
+    }
+
     @IBOutlet var mediaTagsView: NSView!
     @IBOutlet var volume: NSSlider!
     @IBOutlet var alternateGroup: NSPopUpButton!

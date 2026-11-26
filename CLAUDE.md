@@ -1,0 +1,63 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Subler is a macOS AppKit application for muxing and tagging MP4/M4V/M4A files: it demuxes video/audio/subtitle/chapter tracks from mov, mp4, mkv, and raw formats, muxes them into QuickTime-compatible MP4 files (including Apple-compatible tx3g subtitle tracks), and edits metadata with lookups against TMDb, TVDB, and the iTunes Store.
+
+- App layer (`Classes/`) is pure Swift 5; the app has no storyboards — UI is XIB-based AppKit (`MainMenu.xib` plus per-controller `.xib`/`.strings`).
+- All container-level demux/mux/encode work lives in the **MP42Foundation** git submodule (Objective-C/Objective-C++), built as a framework.
+- Single app target (`Subler`, legacy productName "MP4Sub", bundle id `org.galad.Subler`), deployment target macOS 10.13. Only external dependency is Sparkle (SPM) for auto-updates.
+
+## Build
+
+The MP42Foundation submodule must be initialized or the app will not compile:
+
+```
+git submodule update --init --recursive
+```
+
+Build with Xcode (Subler scheme) or CLI:
+
+```
+xcodebuild -project Subler.xcodeproj -scheme Subler -configuration Debug build MACOSX_DEPLOYMENT_TARGET=12.0
+```
+
+Recent Xcode toolchains refuse the projects' 10.13 deployment target on command-line builds; the `MACOSX_DEPLOYMENT_TARGET=12.0` override is CLI-only — don't change the project settings.
+
+There is **no test target and no CI** — changes are verified by building and running the app manually. The `Utilities/` tools (MP4Dump legacy ObjC debugging tool, ParseFilename Perl script) are not part of the app build.
+
+## Architecture
+
+Two layers with a strict boundary:
+
+### 1. App layer (`Classes/`, Swift)
+
+- **Document flow**: `Document.swift` (NSDocument subclass) owns the opened file; `read(from:)` produces an `MP42File`. `DocumentWindowController` hosts the per-document window (tracks table, property view tabs). Export goes through `Document.save(to:...)` / `SaveOptions` and runs asynchronously; `sendToQueue` hands the document to the queue instead.
+- **MKV tags-only mode**: `.mkv/.mka/.mks` open directly (`DocumentController.openDocument` in `AppDelegate.swift` passes them through instead of forcing the convert-import sheet). `Document.isMatroska` then drives everything: the model is an in-memory `MP42File` filled from `MP42FileImporter` in **tagsOnly mode** (`initWithURL:tagsOnly:` — mirrors the file's own `TrackFlagEnabled` instead of the MP4 "first-of-type enabled" heuristic, so untouched tracks don't look edited), Save branches in `Document.writeMatroska`: plain edits rewrite metadata + per-track fields in place via `MP42MkvTagWriter` (never touching clusters), while **deleted tracks or Save-As** trigger a stream-copy rebuild via `MP42MkvRemuxer` (temp file + atomic rename even in place; `hasFileRepresentation == false` still keeps `sendToQueue` on its conversion branch; destination must stay mkv/mka/mks). The remuxer pairs `TrackEntry` elements against `Document.mkvSourceTracks` — an importer-order snapshot taken in `readMatroska` — with keep/drop decided by **object identity**, so the deletion check is immune to model index shifts; after a successful remux the snapshot is re-filtered in the same order. Reordering must never happen on MKV docs (it would break the pairing): drag stays blocked and `DocumentWindowController.delete(tracks:)` skips `organizeAlternateGroups`/`inferMediaCharacteristics` for MKV. Save-As is enabled for MKV; Duplicate/save-and-optimize stay disabled. Track **add/reorder and MP4-only properties stay gated** (`PropertyView.isReadOnly` disables the tabs; metadata tabs stay editable), but real (non-chapter) tracks can be **deleted** (`TracksViewController.deleteSelection` filters chapter rows on MKV; the menu item validates the same rule), and the four fields Matroska actually stores per track are editable and saved — name, language, enabled, subtitle forced. UI split: `TracksViewController.isReadOnly` gates drag/reorder while `isFieldEditable(_:)` re-enables the name/language/enabled cells on real (non-chapter) rows; `PropertyView.allowsTrackEditing` lets `VideoViewController` re-enable just the subtitle forced popup (Never/All only — the per-sample "Any samples" option has no Matroska equivalent). Chapters remain read-only (Chapters-element writing deferred).
+- **Queue engine**: `QueueController` (window UI) → `Queue` (serial `DispatchQueue` worker, persists `[QueueItem]` to disk via `NSKeyedArchiver`, holds IOKit sleep assertions while working) → `QueueItem` (imports a source file into an `MP42File`, then muxes to the destination) → `QueueAction` objects (`QueueActionProtocol`, `.pre`/`.post` types) apply individual transformations (set metadata, force subtitles, language fixes, etc.) to a queue item. Watch for `Queue.Working/Completed/Failed/Cancelled` notifications driving UI updates.
+- **Import**: `FileImportController` wraps `MP42FileImporter` to let users pick which source tracks to import; `isTrackMuxable` / `trackNeedConversion` (in `Utilities.swift`) gate which tracks pass through vs. get converted.
+- **Metadata**: `Classes/MetadataImporters/` holds a `MetadataImporter` protocol with concrete importers (TheMovieDB, TheTVDB, iTunesStore, AppleTV, SquaredTVArt, chapter DBs). Search results (`MetadataResult`/`MetadataResultMap`) are applied onto `MP42Metadata` via `MetadataSearchController`. API tokens are stored/refreshed through `Token.swift`.
+- **Presets**: `Preset` / `QueuePreset` / `MetadataPreset` + `PresetManager` — user-defined rule sets that auto-apply actions and metadata to queue items.
+- **Preferences**: `Prefs.swift` is the single source of truth for settings — nested enums of `@Stored` / `@StoredEnum` property-wrapped `UserDefaults` keys (defaults are auto-registered at startup). Add new settings here, not ad-hoc `UserDefaults` calls.
+- **AppleScript**: `Subler.sdef` defines the scripting dictionary; `ScriptCommand.swift` / `QueueScriptCommand.swift` implement the commands (e.g., "send to queue").
+- **Logging**: `Logger.shared` is the app-wide log sink; `ActivityWindowController` renders the log UI.
+
+### 2. MP42Foundation (git submodule, own `MP42Foundation.xcodeproj`)
+
+Referenced by the main project; `MP42Foundation.framework` is linked and copied into the app bundle. Imported throughout the app as `import MP42Foundation`. Key types: `MP42File` (in-memory MP4 model + muxing/writing), `MP42FileImporter` (demuxing mov/mp4/mkv/subtitle sources, FFmpeg-based), track classes (`MP42VideoTrack`, `MP42AudioTrack`, `MP42SubtitleTrack`, `MP42ChapterTrack`), `MP42Metadata` / `MP42MetadataItem`, `MP42AudioMixdown` / `MP42AudioConversionSettings`, `MP42Languages`.
+
+The app never parses MP4/atom data directly — codec, container, and subtitle-conversion work belongs in the submodule, not in `Classes/`. `Classes/MP42FileAdditions.swift` extends framework types with app-level conveniences.
+
+Matroska tagging in the submodule: `MP42Ebml` provides EBML vint/ID primitives and a Segment top-level scanner (element extents + Void slack); `MP42MatroskaTagMapping` holds the read/write tag maps shared with `MP42MkvImporter` (reader and writer can't drift — a metadata key with no SimpleTag name in the map is **silently dropped** on save, so any new editable metadata key needs a map entry); `MP42MkvTagWriter.writeMetadata:tracks:` rewrites the `Tags` element, cover-art `AttachedFile`, and per-track `TrackEntry` fields (name/language/enabled/forced) in place (mkvpropedit-style: reuse the old extent + Void padding when the payload fits, otherwise rebuild the file tail with recomputed SeekHead/Cues positions through a temp file + atomic replace; size+mtime staleness guard refuses writes on files changed since open; foreign tag groups, unknown TrackEntry children, and non-cover attachments are preserved verbatim; each TrackEntry is diffed against the model's **effective** values so an untouched save is byte-for-byte a no-op). `MP42MkvTagWriter+Internal.h` (framework-internal, not in the umbrella) shares its kid/file model types and payload builders with `MP42MkvRemuxer`, the stream-copy track-removal engine: it rebuilds the whole file, copying every block verbatim except blocks whose unmarked-vint track number (`MP42Ebml.blockTrackNumberAt:`, ≤255) belongs to a removed track — kept tracks keep their original TrackNumbers, so **gaps after a removal are intentional** and no block header is ever rewritten; clusters are scanned header-only (BlockGroup track decided from a ≤64KB peek at its `Block` child), emptied clusters skipped, the trailing unknown-size cluster materialized; SeekHead is written with 8-wide placeholder positions pwrite-patched at the end, and Cues are regenerated at EOF (per-track `CueTrackPositions` incl. `CueRelativePosition`) only when the source had them; `Info`/`Duration` copy verbatim (may overstate a dropped track) and dangling `DefaultTrackUID`/`ChapterTrackUID` refs are preserved. It refuses multiple Segments, stray unknown-size elements, count mismatches between TrackEntry and the passed-in `sourceTracks`, and zero-remaining-track remuxes.
+
+Movie-tab fields that have no Matroska-spec tag (Rating, ContentRating, MediaKind, HDVideo, Cast, TVNetwork, TVEpisodeID) round-trip through community-style SimpleTag names `RATING`/`CONTENTRATING`/`MEDIAKIND`/`HD`/`CAST`/`NETWORK`/`EPISODEID`. Array-typed model values (Cast, Director, Producer, Screenwriters) are written joined with `", "` and re-split by the importer. The importer only synthesizes a TVEpisodeID from season/episode on the **conversion** path — in tagsOnly mode a synthesized value would leak into the file as a tag the user never set.
+
+The Matroska track-field element ids are a trap: the ids that actually work in the wild (libebml/mkvtoolnix/ffmpeg and every reader) are `0x22B59C` = ISO-639-2/B `Language`, `0x22B59D` = BCP-47 `LanguageIETF`, `0xB9` = `TrackFlagEnabled`. The EBML spec's later `0x447A` carries the same ISO value but mkvtoolnix never writes it — `MatroskaParser.c` reads it defensively, the writer normalizes it to `0x22B59C`. Modern mkvtoolnix files may carry **only** `0x22B59D` (mkvmerge derives the ISO code from the IETF tag), so `Language` can be absent; the importer/writer prefer `LanguageIETF` when present and fall back to the ISO element. Match TrackEntry↔model by file order (chapter pseudo-track filtered); a count mismatch refuses the write.
+
+## Cross-cutting concerns
+
+- **Sandbox vs non-sandbox builds**: `#if SB_SANDBOX` guards App Store code paths (security-scoped bookmarks via `MP42SecurityAccessToken`); the default build is the non-sandboxed Sparkle-updatable variant (`Subler.entitlements` exist for the sandboxed config).
+- **Localization**: 183 `.strings` files live in per-locale `.lproj` directories scattered next to the code/XIBs they localize (repo root, `Classes/`, `Classes/PropertyView/`), not one central file. Locales: Base (English), it, fr, es-419, pt-BR, zh-CN, zh-Hans. When adding a UI string, find the sibling `.strings` used by that XIB/view.
+- **Static data**: `Resources/*.json` — `Alpha2.json` (ISO language codes, used by `LanguageTransformer`), `iTunesStores.json`, `Storefronts.json`, `Ratings.json`.

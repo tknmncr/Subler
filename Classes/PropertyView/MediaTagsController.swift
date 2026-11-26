@@ -101,6 +101,15 @@ final class MediaTagsController: NSViewController, NSTableViewDataSource, NSTabl
     }
     private var tags: [MediaTag]
 
+    /// Propagated from the hosting PropertyView (Matroska tags-only mode).
+    var isReadOnly = false {
+        didSet {
+            if isViewLoaded, isReadOnly != oldValue {
+                tableView.reloadData()
+            }
+        }
+    }
+
     override var nibName: NSNib.Name? {
         return "MediaTagsController"
     }
@@ -162,6 +171,7 @@ final class MediaTagsController: NSViewController, NSTableViewDataSource, NSTabl
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let view = tableView.makeView(withIdentifier: NSUserInterfaceItemIdentifier(rawValue: "SBCheckBoxTableCellView"), owner: self) as? CheckBoxTableCellView
         view?.representedTag = tags[row]
+        view?.checkBox.isEnabled = !isReadOnly
         return view
     }
 

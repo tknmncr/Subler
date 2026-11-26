@@ -40,7 +40,10 @@ final class DocumentController : NSDocumentController {
     override func openDocument(withContentsOf url: URL, display displayDocument: Bool, completionHandler: @escaping (NSDocument?, Bool, Error?) -> Void) {
         let ext = url.pathExtension.lowercased()
 
-        if ["mkv", "mka", "mks", "mov", "264", "h264"].contains(ext) {
+        // Matroska files open directly as tags-only documents (see
+        // Document.read); the remaining formats below can only be converted
+        // to MP4, so offer the import sheet on a fresh untitled document.
+        if ["mov", "264", "h264"].contains(ext) {
             do {
                 let doc = try self.openUntitledDocumentAndDisplay(displayDocument)
                 completionHandler(doc, false, nil)

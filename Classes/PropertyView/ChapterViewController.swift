@@ -76,7 +76,11 @@ final class ChapterViewController : PropertyView, NSTableViewDataSource, NSTable
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        removeChapter.isEnabled =  tableView.selectedRow != -1 ? true : false
+        removeChapter.isEnabled = tableView.selectedRow != -1 && isReadOnly == false
+    }
+
+    func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
+        return isReadOnly == false
     }
 
     @IBAction func setChapterTitle(_ sender: NSTextField) {
@@ -101,12 +105,14 @@ final class ChapterViewController : PropertyView, NSTableViewDataSource, NSTable
     }
 
     @IBAction func doubleClickAction(_ sender: NSTableView) {
+        guard isReadOnly == false else { return }
         if sender.clickedRow > -1 && sender.clickedColumn > -1 {
             sender.editColumn(sender.clickedColumn, row: sender.clickedRow, with: nil, select: true)
         }
     }
 
     func deleteSelection(in tableview: NSTableView) {
+        guard isReadOnly == false else { return }
         let indexes = tableView.selectedRowIndexes
         if indexes.isEmpty == false {
             track.removeChapters(at: indexes)

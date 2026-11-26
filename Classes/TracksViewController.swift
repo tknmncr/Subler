@@ -31,6 +31,21 @@ final class TracksViewController: NSViewController, NSTableViewDataSource, NSTab
 
     @IBOutlet var tracksTable: ExpandedTableView!
 
+    // In Matroska tags-only mode the track list cannot be structurally
+    // changed: no deletion, reordering or import.
+    private var isReadOnly: Bool {
+        return document.isMatroska
+    }
+
+    // The per-track fields whose values MP42MkvTagWriter writes back into the
+    // file's Tracks element (name, language, enabled, subtitle forced) stay
+    // editable even in tags-only mode; the chapter pseudo-track has no
+    // Matroska counterpart.
+    private func isFieldEditable(_ track: MP42Track?) -> Bool {
+        guard let track = track else { return false }
+        return document.isMatroska == false || track.isMember(of: MP42ChapterTrack.self) == false
+    }
+
     private static let languagesMenu: NSMenu = {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -100,16 +115,28 @@ final class TracksViewController: NSViewController, NSTableViewDataSource, NSTab
 
     @IBAction func doubleClickAction(_ sender: NSTableView) {
         // make sure they clicked a real cell and not a header or empty row
-        if sender.clickedRow >= 1 {
+        if sender.clickedRow >= 1, let track = track(at: sender.clickedRow) {
             let column = sender.tableColumns[sender.clickedColumn]
-            if column.identifier == trackNameColumn {
+            if column.identifier == trackNameColumn, isFieldEditable(track) {
                 sender.editColumn(sender.clickedColumn, row: sender.clickedRow, with: nil, select: true)
             }
         }
     }
 
     func deleteSelection(in tableview: NSTableView) {
-        delegate?.delete(tracks: selectedTracks)
+        // On MKV documents real tracks are deletable too (the remuxer drops
+        // their blocks on save); the chapter pseudo-track still is not.
+        let deletable = document.isMatroska ? selectedTracks.filter { isFieldEditable($0) } : selectedTracks
+        guard deletable.isEmpty == false else { return }
+        delegate?.delete(tracks: deletable)
+    }
+
+    func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
+        if isReadOnly == false {
+            return true
+        }
+        // tags-only mode still allows inline renaming of real tracks
+        return tableColumn?.identifier == trackNameColumn && isFieldEditable(track(at: row))
     }
 
     // MARK: Actions
@@ -180,12 +207,13 @@ final class TracksViewController: NSViewController, NSTableViewDataSource, NSTab
             case trackEnabledColumn?:
                 let cell = tableView.makeView(withIdentifier: trackEnabledColumn, owner:self) as? CheckBoxCellView
                 cell?.checkboxButton?.state = track.isEnabled ? NSControl.StateValue.on : NSControl.StateValue.off
+                cell?.checkboxButton?.isEnabled = isFieldEditable(track)
                 return cell
 
             case trackNameColumn?:
                 let cell = tableView.makeView(withIdentifier: trackNameColumn, owner:self) as? NSTableCellView
                 cell?.textField?.stringValue = track.name
-                cell?.textField?.isEditable = true
+                cell?.textField?.isEditable = isFieldEditable(track)
                 return cell
 
             case trackDurationColumn?:
@@ -208,11 +236,25 @@ final class TracksViewController: NSViewController, NSTableViewDataSource, NSTab
                 }
 
                 cell?.textField?.stringValue = MP42Languages.defaultManager.localizedLang(forExtendedTag: track.language)
+                cell?.popUpButton?.isEnabled = isFieldEditable(track)
                 return cell
 
             case trackInfoColumn?:
                 let cell = tableView.makeView(withIdentifier: trackInfoColumn, owner:self) as? NSTableCellView
-                cell?.textField?.stringValue = track.formatSummary
+                if isReadOnly {
+                    // Tags-only documents never mux, and the default conversion
+                    // settings attached at import (see Document.readMatroska)
+                    // would make formatSummary advertise a conversion target
+                    // instead of the actual source codec.
+                    var summary = localizedDisplayName(track.mediaType, track.format) ?? "Unknown"
+                    if let audioTrack = track as? MP42AudioTrack, audioTrack.channels > 0,
+                       track.format != kMP42AudioCodecType_DTS {
+                        summary = "\(summary), \(audioTrack.channels) ch"
+                    }
+                    cell?.textField?.stringValue = summary
+                } else {
+                    cell?.textField?.stringValue = track.formatSummary
+                }
                 return cell
 
             default:
@@ -260,6 +302,9 @@ final class TracksViewController: NSViewController, NSTableViewDataSource, NSTab
 
     func tableView(_ tableView: NSTableView,
                    pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        if isReadOnly {
+            return nil
+        }
         if let track = track(at: row), track.isMuxed == false {
             return PasteboardItem(index: row, type: .tableViewIndex)
         } else {
@@ -271,6 +316,7 @@ final class TracksViewController: NSViewController, NSTableViewDataSource, NSTab
                    validateDrop info: NSDraggingInfo,
                    proposedRow row: Int,
                    proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        if isReadOnly { return [] }
         guard dropOperation == .above else { return [] }
 
         guard let source = info.draggingSource as? NSTableView,

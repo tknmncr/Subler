@@ -235,15 +235,38 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
         trackViewController.view.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
         detailsItem.viewController.view.addSubview(trackViewController.view)
 
+        // Tags-only mode: tracks are displayed but cannot be modified, except
+        // for the fields MP42MkvTagWriter writes back (see allowsTrackEditing).
+        // Set after the view is loaded so it wins over controls that the view
+        // controllers enable during their own updates.
+        trackViewController.isMatroskaDocument = doc.isMatroska
+        if doc.isMatroska, !(trackViewController is MovieViewController) {
+            trackViewController.allowsTrackEditing = true
+            trackViewController.isReadOnly = true
+        } else {
+            trackViewController.allowsTrackEditing = false
+            trackViewController.isReadOnly = false
+        }
+
         selectTabViewItem(for: trackViewController)
     }
 
     func delete(tracks: [MP42Track]) {
+        var tracks = tracks
+        if doc.isMatroska {
+            // Only real tracks are deletable on tags-only documents; the save
+            // path stream-copy-remuxes their blocks away (MP42MkvRemuxer).
+            tracks = tracks.filter { $0.isMember(of: MP42ChapterTrack.self) == false }
+        }
         if tracks.isEmpty == false {
             mp4.removeTracks(tracks)
 
-            if Prefs.organizeAlternateGroups { mp4.organizeAlternateGroups() }
-            if Prefs.inferMediaCharacteristics { mp4.inferMediaCharacteristics() }
+            if doc.isMatroska == false {
+                // Both heuristics reorder the track model, which would break
+                // the TrackEntry/order pairing the MKV writers depend on.
+                if Prefs.organizeAlternateGroups { mp4.organizeAlternateGroups() }
+                if Prefs.inferMediaCharacteristics { mp4.inferMediaCharacteristics() }
+            }
 
             tracksViewController.reloadData()
         }
@@ -254,22 +277,25 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
     func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
 
-        case #selector(selectFile(_:)),
-             #selector(selectMetadataFile(_:)),
+        case #selector(selectMetadataFile(_:)),
              #selector(searchMetadata(_:)),
+             #selector(sendToQueue(_:)):
+            return true
+
+        // Track/chapter modifications: unavailable in Matroska tags-only mode.
+        case #selector(selectFile(_:)),
              #selector(searchChapters(_:)),
              #selector(addChaptersEvery(_:)),
              #selector(iTunesFriendlyTrackGroups(_:)),
              #selector(clearTrackNames(_:)),
              #selector(prettifyAudioTrackNames(_:)),
-             #selector(fixAudioFallbacks(_:)),
-             #selector(sendToQueue(_:)):
-            return true
+             #selector(fixAudioFallbacks(_:)):
+            return !doc.isMatroska
 
         case #selector(sendToExternalApp(_:)) where mp4.hasFileRepresentation && doc.isDocumentEdited == false:
             return true
 
-        case #selector(showTrackOffsetSheet(_:)) where tracksViewController.selectedTracks.isEmpty == false:
+        case #selector(showTrackOffsetSheet(_:)) where doc.isMatroska == false && tracksViewController.selectedTracks.isEmpty == false:
             return true
 
         case #selector(export(_:)) where tracksViewController.selectedTracks.isEmpty == false:
@@ -280,7 +306,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
             }
 
         case #selector(DocumentWindowController.deleteTrack(_:)):
-            return tracksViewController.selectedTracks.isEmpty == false && NSApp.isActive
+            // MKV documents allow deleting real tracks (stream-copy remux on
+            // save); a chapter-row-only or empty selection stays invalid.
+            let hasDeletable = tracksViewController.selectedTracks.contains {
+                doc.isMatroska == false || $0.isMember(of: MP42ChapterTrack.self) == false
+            }
+            return hasDeletable && NSApp.isActive
 
         default:
             return false
@@ -558,6 +589,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
     }
 
     func showImportSheet(fileURLs: [URL]) {
+        guard doc.isMatroska == false else { return }
+
         do {
             let controller = try FileImportController(fileURLs: fileURLs, delegate: self)
 
@@ -639,9 +672,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
             let items = pasteboard.readObjects(forClasses: [NSURL.classForCoder()], options: [:]) as? [URL]
             else { return false }
 
-        let chapters = items.filter { $0.pathExtension.lowercased() == "txt" }
-        if let url = chapters.first {
-            addChapters(fileURL: url)
+        // Metadata drops are fine in tags-only mode; chapter and track
+        // imports modify tracks, which Matroska documents cannot do.
+        if doc.isMatroska == false {
+            let chapters = items.filter { $0.pathExtension.lowercased() == "txt" }
+            if let url = chapters.first {
+                addChapters(fileURL: url)
+            }
         }
 
         let metadata = items.filter { let ext = $0.pathExtension.lowercased(); return ext == "xml" ||  ext == "nfo" }

@@ -20,6 +20,24 @@ final class VideoViewController: PropertyView {
 
     private let mediaTagsController: MediaTagsController
 
+    override var isReadOnly: Bool {
+        didSet {
+            mediaTagsController.isReadOnly = isReadOnly
+            // Matroska tags-only: FlagForced is writable (Never/All — the
+            // per-sample "Any samples" option has no Matroska equivalent).
+            if isReadOnly, allowsTrackEditing, isViewLoaded, track is MP42SubtitleTrack {
+                let anySamplesIndex = forcedSubs.indexOfItem(withTag: 1)
+                if anySamplesIndex >= 0 {
+                    forcedSubs.removeItem(at: anySamplesIndex)
+                }
+                if forcedSubs.indexOfSelectedItem == -1 {
+                    forcedSubs.selectItem(withTag: 0)
+                }
+                forcedSubs.isEnabled = true
+            }
+        }
+    }
+
     override var nibName: NSNib.Name? {
         return "VideoView"
     }
