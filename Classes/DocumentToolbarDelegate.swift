@@ -58,11 +58,16 @@ class DocumentToolbarDelegate: NSObject, NSToolbarDelegate {
                 submenu.addItem(menuItem)
             }
 
+            let insertChapter = NSMenuItem()
+            insertChapter.title = NSLocalizedString("Insert a chapter", comment: "Toolbar")
+            insertChapter.action = #selector(DocumentWindowController.insertChapter(_:))
+
             let chapters = NSMenuItem()
             chapters.title = NSLocalizedString("Insert a chapter every", comment: "Toolbar")
             chapters.submenu = submenu
 
             let menu = NSMenu()
+            menu.addItem(insertChapter)
             menu.addItem(chapters)
             menu.addItem(NSMenuItem.separator())
             menu.addItem(withTitle: NSLocalizedString("Organize alternate groups", comment: "Toolbar"),

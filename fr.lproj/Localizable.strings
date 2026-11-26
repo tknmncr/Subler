@@ -249,6 +249,7 @@ Undo tag insert. */
 "Insert" = "Insérer";
 
 /* Toolbar */
+"Insert a chapter" = "Insérer un chapitre";
 "Insert a chapter every" = "Insérer un chapitre à chaque";
 
 /* nil */

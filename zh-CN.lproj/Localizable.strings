@@ -237,6 +237,7 @@ Undo tag insert. */
 "Insert" = "插入";
 
 /* Toolbar */
+"Insert a chapter" = "插入一个章节标记";
 "Insert a chapter every" = "插入章节标记 每隔";
 
 /* nil */

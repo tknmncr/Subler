@@ -26,12 +26,13 @@ final class Document: NSDocument {
     // pseudo-track filtered): the baseline MP42MkvRemuxer pairs TrackEntry
     // elements against, so a deleted track is detected by object identity.
     private var mkvSourceTracks: [MP42Track] = []
-    // Chapter rows as the file's baseline holds them (model milliseconds).
-    // nil when the last read/written file had no chapters. Compared against
-    // the model on save: model-vs-snapshot (not model-vs-file) because the
-    // importer itself drops some atoms (duplicate zero timestamps), and
-    // those silently-dropped atoms must not look like a user edit.
-    private var mkvChaptersSnapshot: [(timestamp: UInt64, title: String)]?
+    // Chapter rows as the file's baseline holds them (model milliseconds,
+    // plus the track-level chapter language the remuxer stamps as
+    // ChapterLanguage). nil when the last read/written file had no chapters.
+    // Compared against the model on save: model-vs-snapshot (not model-vs-
+    // file) because the importer itself drops some atoms (duplicate zero
+    // timestamps), and those silently-dropped atoms must not look like an edit.
+    private var mkvChaptersSnapshot: [(timestamp: UInt64, title: String, language: String)]?
     private var mkvFileSize: UInt64 = 0
     private var mkvFileModificationDate: Date?
 
@@ -333,7 +334,8 @@ final class Document: NSDocument {
         case (nil, nil): chaptersChanged = false
         case let (model?, snapshot?):
             chaptersChanged = model.count != snapshot.count ||
-                zip(model, snapshot).contains { $0.timestamp != $1.timestamp || $0.title != $1.title }
+                zip(model, snapshot).contains { $0.timestamp != $1.timestamp
+                    || $0.title != $1.title || $0.language != $1.language }
         default: chaptersChanged = true
         }
 
@@ -366,9 +368,13 @@ final class Document: NSDocument {
     // Stream-copy rebuild: blocks are copied verbatim except those of removed
     // tracks, and metadata/cover/track-field edits ride in the same pass.
     // Writes a temp file and renames atomically; see MP42MkvRemuxer.h.
-    private static func matroskaChapterRows(_ track: MP42ChapterTrack?) -> [(timestamp: UInt64, title: String)]? {
+    private static func matroskaChapterRows(_ track: MP42ChapterTrack?)
+            -> [(timestamp: UInt64, title: String, language: String)]? {
         guard let track else { return nil }
-        return track.chapters.map { ($0.timestamp, $0.title) }
+        // The language is track-level; repeated per row so the zip comparison
+        // above covers language-only edits.
+        let language = track.language
+        return track.chapters.map { ($0.timestamp, $0.title, language) }
     }
 
     private func remuxMatroska(to url: URL, currentTracks: [MP42Track],

@@ -266,6 +266,7 @@ Undo tag insert. */
 "Insert" = "insertar";
 
 /* Toolbar */
+"Insert a chapter" = "Insertar un capítulo";
 "Insert a chapter every" = "Insertar un capítulo cada";
 
 /* color profile */

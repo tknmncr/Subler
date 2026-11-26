@@ -129,6 +129,18 @@ final class ChapterViewController : PropertyView, NSTableViewDataSource, NSTable
         deleteSelection(in: tableView)
     }
 
+    // Selects and scrolls to a row (used after the window controller appends
+    // a chapter from the Actions menu, when the tab may not have shown this
+    // track's table yet).
+    func selectChapter(at index: Int) {
+        guard isViewLoaded, index >= 0, index < track.chapters.count else { return }
+        tableView.reloadData()
+        tableView.scrollRowToVisible(index)
+        let indexSet = IndexSet(integer: index)
+        tableView.selectRowIndexes(indexSet, byExtendingSelection: false)
+        view.window?.makeFirstResponder(tableView)
+    }
+
     @IBAction func addChapter(_ sender: Any) {
         let index = track.addChapter("Chapter", timestamp: 0)
         let indexSet = IndexSet(integer: Int(index))

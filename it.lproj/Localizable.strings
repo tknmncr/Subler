@@ -251,6 +251,7 @@ Enable subtitles track local description */
 "Import tracks from external files" = "Importa le tracce da un file esterno";
 
 /* Toolbar */
+"Insert a chapter" = "Inserisci un capitolo";
 "Insert a chapter every" = "Inserisci un capitolo ogni";
 
 /* color profile */

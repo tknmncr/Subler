@@ -46,6 +46,14 @@ final class TracksViewController: NSViewController, NSTableViewDataSource, NSTab
         return document.isMatroska == false || track.isMember(of: MP42ChapterTrack.self) == false
     }
 
+    // The chapter pseudo-track has no TrackEntry for the tag writer, but it
+    // carries the language the remuxer stamps into every ChapterDisplay on
+    // save, so its language popup is editable on Matroska documents too.
+    private func isLanguageEditable(_ track: MP42Track?) -> Bool {
+        guard let track = track else { return false }
+        return isFieldEditable(track) || track.isMember(of: MP42ChapterTrack.self)
+    }
+
     private static let languagesMenu: NSMenu = {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -125,8 +133,12 @@ final class TracksViewController: NSViewController, NSTableViewDataSource, NSTab
 
     func deleteSelection(in tableview: NSTableView) {
         // On MKV documents real tracks are deletable too (the remuxer drops
-        // their blocks on save); the chapter pseudo-track still is not.
-        let deletable = document.isMatroska ? selectedTracks.filter { isFieldEditable($0) } : selectedTracks
+        // their blocks on save) and so is the chapter pseudo-track: with it
+        // gone the model reports "no chapters", so the save remuxes and the
+        // Chapters element is deleted (same as emptying the Chapters tab).
+        let deletable = document.isMatroska
+            ? selectedTracks.filter { isFieldEditable($0) || $0.isMember(of: MP42ChapterTrack.self) }
+            : selectedTracks
         guard deletable.isEmpty == false else { return }
         delegate?.delete(tracks: deletable)
     }
@@ -236,7 +248,7 @@ final class TracksViewController: NSViewController, NSTableViewDataSource, NSTab
                 }
 
                 cell?.textField?.stringValue = MP42Languages.defaultManager.localizedLang(forExtendedTag: track.language)
-                cell?.popUpButton?.isEnabled = isFieldEditable(track)
+                cell?.popUpButton?.isEnabled = isLanguageEditable(track)
                 return cell
 
             case trackInfoColumn?:

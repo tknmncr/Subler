@@ -254,12 +254,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
     }
 
     func delete(tracks: [MP42Track]) {
-        var tracks = tracks
-        if doc.isMatroska {
-            // Only real tracks are deletable on tags-only documents; the save
-            // path stream-copy-remuxes their blocks away (MP42MkvRemuxer).
-            tracks = tracks.filter { $0.isMember(of: MP42ChapterTrack.self) == false }
-        }
+        // On MKV docs the save path stream-copy-remuxes removed real tracks'
+        // blocks away (MP42MkvRemuxer); a removed chapter pseudo-track makes
+        // the model report "no chapters", which deletes the Chapters element.
         if tracks.isEmpty == false {
             mp4.removeTracks(tracks)
 
@@ -281,7 +278,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
 
         case #selector(selectMetadataFile(_:)),
              #selector(searchMetadata(_:)),
-             #selector(sendToQueue(_:)):
+             #selector(sendToQueue(_:)),
+             #selector(insertChapter(_:)),
+             #selector(addChaptersEvery(_:)):
             return true
 
         // Matroska documents may import subtitle text files (written as
@@ -289,9 +288,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
         case #selector(selectFile(_:)):
             return true
 
-        // Chapter/track bulk modifications: unavailable in Matroska tags-only mode.
+        // Track bulk modifications (and the chapter-DB search, whose apply
+        // path lacks the tags-only bookkeeping): unavailable in Matroska
+        // tags-only mode. The Insert-a-chapter actions are NOT on this list —
+        // chapter changes ride the stream-copy remuxer, so they work on MKV.
         case #selector(searchChapters(_:)),
-             #selector(addChaptersEvery(_:)),
              #selector(iTunesFriendlyTrackGroups(_:)),
              #selector(clearTrackNames(_:)),
              #selector(prettifyAudioTrackNames(_:)),
@@ -313,11 +314,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
 
         case #selector(DocumentWindowController.deleteTrack(_:)):
             // MKV documents allow deleting real tracks (stream-copy remux on
-            // save); a chapter-row-only or empty selection stays invalid.
-            let hasDeletable = tracksViewController.selectedTracks.contains {
-                doc.isMatroska == false || $0.isMember(of: MP42ChapterTrack.self) == false
-            }
-            return hasDeletable && NSApp.isActive
+            // save) and the chapter pseudo-track (the Chapters element is
+            // removed on save), so any non-empty selection is deletable.
+            return tracksViewController.selectedTracks.isEmpty == false && NSApp.isActive
 
         default:
             return false
@@ -375,8 +374,58 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
         delete(tracks: tracksViewController.selectedTracks)
     }
 
+    // Single-chapter insert that also bootstraps the chapter track, so it
+    // works on documents without any chapters yet (both containers: on MKV
+    // the new rows ride the remuxer on save, like the Chapters tab's edits).
+    @IBAction func insertChapter(_ sender: Any) {
+        let track: MP42ChapterTrack
+        if let existing = mp4.chapters {
+            track = existing
+        } else {
+            track = MP42ChapterTrack()
+            mp4.addTrack(track) // addTrack: replaces any previous chapter track
+            if doc.isMatroska {
+                // addTrack: zeroes trackId; keep the table numbering dense.
+                track.trackId = (mp4.tracks.map { $0.trackId }.max() ?? 0) + 1
+            }
+        }
+
+        // A brand-new track gets its first chapter at 0; inserting into an
+        // existing track places the chapter 1s after the latest start, so it
+        // never ties with a stored chapter (ties get clamped +1ms on write,
+        // which would silently shift the user's own chapter times). The user
+        // retimes/renames the row either way.
+        var newTimestamp: UInt64 = 0
+        if let last = track.chapters.max(by: { $0.timestamp < $1.timestamp }) {
+            newTimestamp = last.timestamp + 1000
+            if track.duration > last.timestamp + 1, newTimestamp >= track.duration {
+                newTimestamp = track.duration - 1
+            }
+        }
+        let index = track.addChapter("Chapter", timestamp: newTimestamp)
+
+        if doc.isMatroska {
+            // The tags-only model has no muxing step to mark the document.
+            doc.updateChangeCount(.changeDone)
+        }
+
+        tracksViewController.reloadData()
+        tracksViewController.selectTracks([track])
+        chapterViewController?.selectChapter(at: Int(index))
+    }
+
     @IBAction func addChaptersEvery(_ sender: NSMenuItem) {
-        let track: MP42ChapterTrack = mp4.chapters ?? { let track = MP42ChapterTrack(); self.mp4.addTrack(track); return track }()
+        // Creates the chapter track when the document has none (same
+        // bookkeeping as insertChapter: addTrack: zeroes trackId and the
+        // tags-only model has no muxing step to mark the document dirty).
+        let existing = mp4.chapters
+        let track: MP42ChapterTrack = existing ?? MP42ChapterTrack()
+        if existing == nil {
+            mp4.addTrack(track) // addTrack: replaces any previous chapter track
+            if doc.isMatroska {
+                track.trackId = (mp4.tracks.map { $0.trackId }.max() ?? 0) + 1
+            }
+        }
         let minutes = sender.tag * 60 * 1000
 
         if minutes > 0 {
@@ -386,6 +435,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
         }
         else {
             track.addChapter("Chapter 1", timestamp: 0)
+        }
+
+        if doc.isMatroska {
+            doc.updateChangeCount(.changeDone)
         }
 
         tracksViewController.reloadData()
