@@ -280,7 +280,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
              #selector(searchMetadata(_:)),
              #selector(sendToQueue(_:)),
              #selector(insertChapter(_:)),
-             #selector(addChaptersEvery(_:)):
+             #selector(addChaptersEvery(_:)),
+             #selector(searchChapters(_:)):
             return true
 
         // Matroska documents may import subtitle text files (written as
@@ -288,12 +289,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
         case #selector(selectFile(_:)):
             return true
 
-        // Track bulk modifications (and the chapter-DB search, whose apply
-        // path lacks the tags-only bookkeeping): unavailable in Matroska
-        // tags-only mode. The Insert-a-chapter actions are NOT on this list —
-        // chapter changes ride the stream-copy remuxer, so they work on MKV.
-        case #selector(searchChapters(_:)),
-             #selector(iTunesFriendlyTrackGroups(_:)),
+        // Track bulk modifications: unavailable in Matroska tags-only mode.
+        // Chapter actions (searchChapters, the Insert-a-chapter commands) are
+        // NOT on this list — chapter changes ride the stream-copy remuxer,
+        // so they work on MKV too.
+        case #selector(iTunesFriendlyTrackGroups(_:)),
              #selector(clearTrackNames(_:)),
              #selector(prettifyAudioTrackNames(_:)),
              #selector(fixAudioFallbacks(_:)):
@@ -552,7 +552,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
             chapterTrack.addChapter(chapter)
         }
 
-        mp4.addTrack(chapterTrack)
+        mp4.addTrack(chapterTrack) // addTrack: replaces any previous chapter track
+        if doc.isMatroska {
+            // Tags-only bookkeeping, same as addChapters/insertChapter:
+            // addTrack: zeroes trackId, and nothing else marks the document.
+            chapterTrack.trackId = (mp4.tracks.map { $0.trackId }.max() ?? 0) + 1
+            doc.updateChangeCount(.changeDone)
+        }
         tracksViewController.reloadData()
         tracksViewController.selectTracks([chapterTrack])
     }
@@ -761,8 +767,22 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, Trac
     }
 
     @objc func importFilesDirectly(_ fileURLs: [URL]) {
+        // Mirror the open panel's extension routing (selectFile): chapter
+        // text files go to the chapter commands — addChapters bootstraps the
+        // chapter track on both containers — everything else to the regular
+        // track importer.
+        var mediaURLs: [URL] = []
+        for url in fileURLs {
+            switch url.pathExtension.lowercased() {
+            case "txt": addChapters(fileURL: url)
+            case "csv": updateChapters(fileURL: url)
+            default: mediaURLs.append(url)
+            }
+        }
+        guard mediaURLs.isEmpty == false else { return }
+
         do {
-            let controller = try FileImportController(fileURLs: fileURLs, delegate: self)
+            let controller = try FileImportController(fileURLs: mediaURLs, delegate: self)
 
             // Call addTracks directly - the Settings initialization logic runs when the controller is created
             controller.addTracks(self)

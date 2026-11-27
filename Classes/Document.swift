@@ -339,7 +339,12 @@ final class Document: NSDocument {
         default: chaptersChanged = true
         }
 
-        if tracksChanged || chaptersChanged || saveOperation != .saveOperation {
+        // `optimize` (Save and Optimize) forces the structural branch: the
+        // Matroska equivalent of reordering atoms is rebuilding the whole file
+        // — blocks stream-copied verbatim, Tracks/Tags rewritten, SeekHead and
+        // Cues regenerated — i.e. exactly the Save-As pass, done in place
+        // through the remuxer's temp file + atomic rename.
+        if tracksChanged || chaptersChanged || optimize || saveOperation != .saveOperation {
             // An absent model track means "no chapters" — pass an empty
             // track so the remuxer removes the element rather than copying
             // the old one verbatim (nil replacement = verbatim).
@@ -480,7 +485,13 @@ final class Document: NSDocument {
             return true
         case #selector(sendToQueue(_:)):
             return true
-        case #selector(saveAndOptimize(_:)) where isDocumentEdited == false && mp4.hasFileRepresentation == true:
+        // On a Matroska document optimize = full remuxer rebuild (see
+        // writeMatroska), the container-equivalent of the atom-order optimize.
+        // Tags-only models report hasFileRepresentation == false (their tracks
+        // are never muxed), so the on-disk precondition there is just the
+        // remux source: fileURL.
+        case #selector(saveAndOptimize(_:)) where isDocumentEdited == false
+                && (isMatroska ? fileURL != nil : mp4.hasFileRepresentation == true):
             return true
         default:
             return false
